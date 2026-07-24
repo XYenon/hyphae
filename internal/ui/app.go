@@ -12,7 +12,6 @@ import (
 	"github.com/atotto/clipboard"
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
-	"golang.org/x/sys/unix"
 
 	"github.com/aleksanaa/hyphae/internal/config"
 	"github.com/aleksanaa/hyphae/internal/controller"
@@ -689,7 +688,7 @@ func flushTTYInput() {
 		return
 	}
 	defer f.Close() //nolint:errcheck
-	_ = unix.IoctlSetInt(int(f.Fd()), unix.TCFLSH, unix.TCIFLUSH)
+	flushTTYReadQueue(f.Fd())
 }
 
 // drawTextBox wraps the given lines in a single-line border sized to the widest
