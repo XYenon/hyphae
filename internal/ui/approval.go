@@ -384,6 +384,20 @@ func (av *ApprovalView) InputHandler() func(*tcell.EventKey, func(tview.Primitiv
 	})
 }
 
+// PasteHandler forwards bracketed-paste text to the deny-reason field, matching
+// InputHandler's rune routing: paste only lands when deny mode is active. Box's
+// default PasteHandler drops it, so this is required for pasting a reason.
+func (av *ApprovalView) PasteHandler() func(string, func(tview.Primitive)) {
+	return av.WrapPasteHandler(func(pastedText string, setFocus func(tview.Primitive)) {
+		if !av.visible || av.selected != "deny" {
+			return
+		}
+		if h := av.denyField.PasteHandler(); h != nil {
+			h(pastedText, setFocus)
+		}
+	})
+}
+
 // ── MouseHandler ─────────────────────────────────────────────────────────────
 
 func (av *ApprovalView) MouseHandler() func(tview.MouseAction, *tcell.EventMouse, func(tview.Primitive)) (bool, tview.Primitive) {

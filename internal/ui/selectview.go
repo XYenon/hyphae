@@ -231,6 +231,20 @@ func (sv *SelectView) InputHandler() func(*tcell.EventKey, func(tview.Primitive)
 	})
 }
 
+// PasteHandler forwards bracketed-paste text to the custom-answer field,
+// matching InputHandler's rune routing: paste only lands when the custom row is
+// the active cursor. Box's default PasteHandler drops it otherwise.
+func (sv *SelectView) PasteHandler() func(string, func(tview.Primitive)) {
+	return sv.WrapPasteHandler(func(pastedText string, setFocus func(tview.Primitive)) {
+		if !sv.visible || sv.cursor != len(sv.options) {
+			return
+		}
+		if h := sv.customField.PasteHandler(); h != nil {
+			h(pastedText, setFocus)
+		}
+	})
+}
+
 // ── MouseHandler ─────────────────────────────────────────────────────────────
 
 func (sv *SelectView) MouseHandler() func(tview.MouseAction, *tcell.EventMouse, func(tview.Primitive)) (bool, tview.Primitive) {

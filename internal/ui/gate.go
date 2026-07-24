@@ -68,6 +68,20 @@ func (g *minSizeGate) InputHandler() func(*tcell.EventKey, func(tview.Primitive)
 	}
 }
 
+// PasteHandler delegates bracketed-paste events to the wrapped primitive.
+// Box.PasteHandler is a no-op, so without this the gate (being the root) would
+// silently drop every paste once EnablePaste is on.
+func (g *minSizeGate) PasteHandler() func(string, func(tview.Primitive)) {
+	return func(pastedText string, setFocus func(tview.Primitive)) {
+		if _, _, small := g.tooSmall(); small {
+			return
+		}
+		if h := g.inner.PasteHandler(); h != nil {
+			h(pastedText, setFocus)
+		}
+	}
+}
+
 // Focus, Blur, and HasFocus delegate to the wrapped primitive. tview only routes
 // keyboard events to the root when root.HasFocus() is true, so without this the
 // gate (being the root) would swallow all input even at a valid size.

@@ -566,6 +566,28 @@ func (cp *CommandPalette) InputHandler() func(*tcell.EventKey, func(tview.Primit
 	})
 }
 
+// PasteHandler forwards bracketed-paste text to whichever field InputHandler
+// would route keystrokes to (the query field, or the active form field). Box's
+// default PasteHandler drops the paste, so without this pasting into the palette
+// would silently do nothing once bracketed paste is enabled.
+func (cp *CommandPalette) PasteHandler() func(string, func(tview.Primitive)) {
+	return cp.WrapPasteHandler(func(pastedText string, setFocus func(tview.Primitive)) {
+		if !cp.visible || cp.mode == paletteModeConfirm {
+			return
+		}
+		var field tview.Primitive = cp.queryField
+		if cp.isFormMode() {
+			field = cp.activeFormPrimitive()
+			if field == nil {
+				return // a non-field row (Delete button, type selector)
+			}
+		}
+		if h := field.PasteHandler(); h != nil {
+			h(pastedText, setFocus)
+		}
+	})
+}
+
 // MouseHandler handles item selection (single click) and confirmation (double click),
 // and form-field focus switching in add-endpoint mode.
 func (cp *CommandPalette) MouseHandler() func(tview.MouseAction, *tcell.EventMouse, func(tview.Primitive)) (bool, tview.Primitive) {

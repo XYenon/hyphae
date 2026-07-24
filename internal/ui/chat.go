@@ -80,6 +80,19 @@ type ChatView struct {
 	anchorBox    int // index into entries where drag started (-1 = none)
 	selCursorBox int // last entries index the cursor touched during drag
 
+	// drag redraw throttle: a drag-select MouseMove would otherwise force a
+	// synchronous redraw per cell (by reporting consumed=true) and flood the
+	// renderer. We redraw at most once per dragFrame and arm a trailing timer
+	// for the final position. requestDraw is Application.Draw (goroutine-safe);
+	// the other two fields are touched only from the main goroutine.
+	requestDraw   func()
+	lastDragDraw  time.Time
+	dragDrawTimer *time.Timer
+
+	// lastHoverDocLine coalesces hover lookups so findMsgAt runs only when the
+	// pointer crosses into a different document line. -1 = unknown/force lookup.
+	lastHoverDocLine int
+
 	// liveStatus holds transient connecting/thinking text set by controller events.
 	// It is shown in the live status slot only when no StatusEvent provides live text.
 	liveStatus string
@@ -125,17 +138,18 @@ func NewChatView() *ChatView {
 	tv.SetBackgroundColor(Theme.Background)
 	art, focal := buildHyphaeArt(time.Now().UnixNano())
 	return &ChatView{
-		TextView:        tv,
-		hoverIdx:        -1,
-		selectedIdx:     -1,
-		lastSelectedIdx: -2,
-		anchorBox:       -1,
-		selCursorBox:    -1,
-		mdCache:         make(map[string][]mdBlock),
-		compactExpanded: make(map[int]bool),
-		statusExpanded:  make(map[int]bool),
-		welcomeArt:      art,
-		welcomeFocal:    focal,
+		TextView:         tv,
+		hoverIdx:         -1,
+		selectedIdx:      -1,
+		lastSelectedIdx:  -2,
+		anchorBox:        -1,
+		selCursorBox:     -1,
+		lastHoverDocLine: -1,
+		mdCache:          make(map[string][]mdBlock),
+		compactExpanded:  make(map[int]bool),
+		statusExpanded:   make(map[int]bool),
+		welcomeArt:       art,
+		welcomeFocal:     focal,
 	}
 }
 
@@ -467,6 +481,46 @@ func (cv *ChatView) HoveredContent() string {
 	return cv.entries[cv.hoverIdx].msg.content
 }
 
+// dragFrame caps how often a drag-select redraws: at most once per frame
+// (~60fps). Terminals emit a MouseMove per cell crossed, and each drag move
+// reports consumed=true, which makes tview redraw synchronously; without this
+// a fast drag floods the renderer with a full rebuild per cell.
+const dragFrame = 16 * time.Millisecond
+
+// throttleDragDraw decides whether the current drag move may redraw now. It
+// returns true at most once per dragFrame; on the throttled path it arms a
+// trailing timer so the pointer's final resting position still renders even if
+// no further move arrives. Called only from the main goroutine (mouse handler).
+func (cv *ChatView) throttleDragDraw() (drawNow bool) {
+	// Any pending trailing draw is superseded by this move; cancel and re-decide.
+	if cv.dragDrawTimer != nil {
+		cv.dragDrawTimer.Stop()
+		cv.dragDrawTimer = nil
+	}
+	if time.Since(cv.lastDragDraw) >= dragFrame {
+		cv.lastDragDraw = time.Now()
+		return true
+	}
+	if cv.requestDraw != nil {
+		// Fire once the frame window elapses. requestDraw is Application.Draw,
+		// which is safe to call from this timer goroutine.
+		cv.dragDrawTimer = time.AfterFunc(dragFrame-time.Since(cv.lastDragDraw), cv.requestDraw)
+	}
+	return false
+}
+
+// updateHover recomputes the hovered message only when the pointer crosses into
+// a different document line, since findMsgAt is a linear scan and horizontal
+// moves within a line cannot change the result. lastHoverDocLine is reset to -1
+// whenever entries change or hover is cleared so the next move recomputes.
+func (cv *ChatView) updateHover(docLine int) {
+	if docLine == cv.lastHoverDocLine {
+		return
+	}
+	cv.lastHoverDocLine = docLine
+	cv.hoverIdx = cv.findMsgAt(docLine)
+}
+
 // MouseHandler wraps TextView's handler to track hover and drag-to-select.
 func (cv *ChatView) MouseHandler() func(tview.MouseAction, *tcell.EventMouse, func(tview.Primitive)) (bool, tview.Primitive) {
 	orig := cv.TextView.MouseHandler()
@@ -489,12 +543,13 @@ func (cv *ChatView) MouseHandler() func(tview.MouseAction, *tcell.EventMouse, fu
 		// (findMsgAt uses y only, so it matches messages regardless of x).
 		if !cv.InInnerRect(mx, my) {
 			cv.hoverIdx = -1
+			cv.lastHoverDocLine = -1
 			return consumed, capture
 		}
 
 		switch action {
 		case tview.MouseLeftDown:
-			cv.hoverIdx = cv.findMsgAt(docLine)
+			cv.updateHover(docLine)
 			cv.selActive = false
 			if cv.hoverIdx >= 0 {
 				cv.selAnchor = selPoint{docLine: docLine, screenX: mx}
@@ -510,16 +565,24 @@ func (cv *ChatView) MouseHandler() func(tview.MouseAction, *tcell.EventMouse, fu
 			}
 
 		case tview.MouseMove:
-			cv.hoverIdx = cv.findMsgAt(docLine)
+			cv.updateHover(docLine)
 			if cv.dragging {
 				cv.selCursor = selPoint{docLine: docLine, screenX: mx}
 				cv.selActive = cv.selCursor != cv.selAnchor
 				cv.updateSelCursorBox(docLine)
-				consumed = true
+				// The selection state above is always updated so no move is lost;
+				// only the synchronous redraw is throttled. Reporting consumed=false
+				// on a sub-frame move skips tview's per-cell redraw (the trailing
+				// timer flushes the final position) without changing capture routing.
+				consumed = cv.throttleDragDraw()
 			}
 
 		case tview.MouseLeftUp:
 			if cv.dragging {
+				if cv.dragDrawTimer != nil {
+					cv.dragDrawTimer.Stop()
+					cv.dragDrawTimer = nil
+				}
 				cv.selCursor = selPoint{docLine: docLine, screenX: mx}
 				cv.dragging = false
 				cv.selActive = cv.selCursor != cv.selAnchor
@@ -528,7 +591,7 @@ func (cv *ChatView) MouseHandler() func(tview.MouseAction, *tcell.EventMouse, fu
 			}
 
 		case tview.MouseLeftClick:
-			cv.hoverIdx = cv.findMsgAt(docLine)
+			cv.updateHover(docLine)
 			// Focusing another message ends auto-follow; clicking the followed
 			// message (selectedIdx while following) leaves it running.
 			if cv.hoverIdx >= 0 && cv.hoverIdx != cv.selectedIdx {
@@ -647,6 +710,7 @@ func (cv *ChatView) buildText(width int) {
 	cv.dragging = false
 	cv.anchorBox = -1
 	cv.selCursorBox = -1
+	cv.lastHoverDocLine = -1 // entries changed; force hover recompute on next move
 
 	lay := newConvoLayout(width)
 
@@ -849,6 +913,7 @@ func (cv *ChatView) HasSelection() bool { return cv.selActive }
 // mouse moves outside the chat view's rect (which the chat handler never sees).
 func (cv *ChatView) ClearHover() {
 	cv.hoverIdx = -1
+	cv.lastHoverDocLine = -1
 	// While following, selectedIdx is the pinned last-message focus, not a click
 	// selection, so leave it for buildText to keep tracking the latest box.
 	if !cv.autoFollow {
