@@ -2,7 +2,9 @@ package agent
 
 import (
 	"context"
+	"crypto/rand"
 	_ "embed"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -320,6 +322,20 @@ func (a *Agent) loop(ctx context.Context, sess *session.Session, ch chan<- Event
 						case <-ctx.Done():
 						}
 					case provider.ChunkToolCall:
+						if chunk.ToolCallID == "" {
+							// Ollama (and other native providers) don't issue tool-call
+							// IDs; each ChunkToolCall is a complete, distinct call. Give
+							// it a synthesized unique ID so it persists under its own
+							// call_id (the store's tool_calls.call_id is UNIQUE) and can
+							// be matched on resume; without one, every call after the
+							// first collides and is dropped on reload.
+							toolCalls = append(toolCalls, provider.ToolCall{
+								ID:    newToolCallID(),
+								Name:  chunk.ToolName,
+								Input: []byte(chunk.ToolInput),
+							})
+							break
+						}
 						// The compat provider emits a complete ChunkToolCall (full
 						// JSON args) once accumulated; index by ID so a repeat for the
 						// same call overwrites rather than duplicates.
@@ -536,6 +552,18 @@ func WorkDirChangedLabel(from, to string) string {
 // NamespaceClearedLabel returns the system-reminder block injected on cold session resume.
 func NamespaceClearedLabel() string {
 	return SystemReminder("This session was resumed from storage. The run namespace has been reset — any variables or functions defined in previous run calls are no longer available.")
+}
+
+// newToolCallID returns a unique tool-call ID for providers that don't supply
+// one (e.g. Ollama). The "call_" prefix mirrors the OpenAI-style IDs the rest of
+// the pipeline expects; the random suffix keeps it unique against the store's
+// UNIQUE call_id constraint.
+func newToolCallID() string {
+	var b [12]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("call_%d", time.Now().UnixNano())
+	}
+	return "call_" + hex.EncodeToString(b[:])
 }
 
 // thinkingUnsupported reports whether err indicates the model rejected the
