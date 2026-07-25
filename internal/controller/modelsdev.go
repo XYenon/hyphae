@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -39,9 +40,39 @@ type ModelDevCatalog struct {
 	catalog modelsDevCatalog
 }
 
-// FetchModelDevCatalog fetches the models.dev catalog once. Returns nil on error;
+var (
+	catalogMu     sync.Mutex
+	cachedCatalog *ModelDevCatalog
+)
+
+// FetchModelDevCatalog returns the models.dev catalog, fetching it once per process
+// and caching the result. The catalog is effectively static (pricing and context
+// windows change rarely), so every model-picker open after the first reuses the
+// cached copy instead of re-downloading it. Failures are not cached, so a fetch
+// that failed while offline is retried on the next call. Returns nil on error;
 // Lookup on a nil catalog safely yields zero values.
 func FetchModelDevCatalog(ctx context.Context) *ModelDevCatalog {
+	catalogMu.Lock()
+	cached := cachedCatalog
+	catalogMu.Unlock()
+	if cached != nil {
+		return cached
+	}
+
+	// Fetch outside the lock (network I/O); a cold-cache race just fetches twice
+	// and keeps the last result, which is harmless.
+	cat := fetchModelDevCatalog(ctx)
+	if cat == nil {
+		return nil
+	}
+	catalogMu.Lock()
+	cachedCatalog = cat
+	catalogMu.Unlock()
+	return cat
+}
+
+// fetchModelDevCatalog performs the uncached HTTP fetch of the models.dev catalog.
+func fetchModelDevCatalog(ctx context.Context) *ModelDevCatalog {
 	reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 

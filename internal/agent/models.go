@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 )
 
 // ModelInfo holds a model ID and its context window size (0 if unknown).
@@ -145,10 +146,23 @@ func (a *Agent) listOllamaModels(ctx context.Context) ([]ModelInfo, error) {
 	if err := httpGetJSON(ctx, base+"/api/tags", nil, &body); err != nil {
 		return nil, err
 	}
+	// Each model's context window needs its own /api/show call; fetch them
+	// concurrently (bounded) so a long model list does not serialize into one slow
+	// request after another. Each goroutine writes its own slice slot.
 	out := make([]ModelInfo, len(body.Models))
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 8)
 	for i, m := range body.Models {
-		out[i] = ModelInfo{ID: m.Name, ContextWindow: ollamaContextWindow(ctx, base, m.Name)}
+		out[i].ID = m.Name
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int, name string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			out[i].ContextWindow = ollamaContextWindow(ctx, base, name)
+		}(i, m.Name)
 	}
+	wg.Wait()
 	return out, nil
 }
 

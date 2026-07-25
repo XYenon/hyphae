@@ -2,6 +2,8 @@ package controller
 
 import (
 	"context"
+	"sync"
+	"time"
 
 	"github.com/aleksanaa/hyphae/internal/agent"
 	"github.com/aleksanaa/hyphae/internal/config"
@@ -86,6 +88,32 @@ func (c *Controller) ListModels(ctx context.Context, ep config.Endpoint) ([]Mode
 		out[i] = Model{Endpoint: ep.Name, ID: m.ID, ContextWindow: m.ContextWindow}
 	}
 	return out, nil
+}
+
+// ListAllModels returns the models across every configured endpoint, enriched with
+// models.dev pricing and context windows. Endpoints are queried concurrently, each
+// bounded by a timeout so one slow or unreachable endpoint cannot stall the rest;
+// results keep configuration order. Endpoints that error contribute no models.
+func (c *Controller) ListAllModels(ctx context.Context) []Model {
+	eps := c.cfg.Endpoints
+	perEndpoint := make([][]Model, len(eps))
+	var wg sync.WaitGroup
+	for i, ep := range eps {
+		wg.Add(1)
+		go func(i int, ep config.Endpoint) {
+			defer wg.Done()
+			epCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
+			perEndpoint[i], _ = c.ListModels(epCtx, ep)
+		}(i, ep)
+	}
+	wg.Wait()
+
+	var models []Model
+	for _, ms := range perEndpoint {
+		models = append(models, ms...)
+	}
+	return c.EnrichPricing(ctx, models)
 }
 
 // EnrichPricing fills context window and pricing for models from the models.dev

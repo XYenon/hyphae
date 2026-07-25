@@ -1171,12 +1171,7 @@ func (a *App) openPalette() {
 func (a *App) enterSelectModel() {
 	a.layout.Palette.switchMode(paletteModeSelectModel)
 	go func() {
-		var models []controller.Model
-		for _, ep := range a.cfg.Endpoints {
-			ms, _ := a.ctrl.ListModels(a.ctrl.Context(), ep)
-			models = append(models, ms...)
-		}
-		models = a.ctrl.EnrichPricing(a.ctrl.Context(), models)
+		models := a.ctrl.ListAllModels(a.ctrl.Context())
 
 		items := make([]PaletteItem, 0, len(models))
 		for _, m := range models {
