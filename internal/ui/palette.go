@@ -59,7 +59,10 @@ var endpointHelpByType = map[string]string{
 		"Lightly tested here, so your luck may vary; please report anything " +
 		"that breaks.",
 	"ollama": "For a local or remote Ollama server, or other serving " +
-		"frameworks that speak the Ollama API, like Lemonade Server and FastFlowLM.",
+		"frameworks that speak the Ollama API, like Lemonade Server and FastFlowLM. " +
+		"Note: Ollama may run a model at a context smaller than the window it " +
+		"advertises due to VRAM limit (see https://docs.ollama.com/context-length), so hyphae may stop " +
+		"generation once it reaches that ceiling; raise it with OLLAMA_CONTEXT_LENGTH.",
 }
 
 // epFormLabelW is the display width of the aligned form labels (epTypeRowLabel,
