@@ -1459,6 +1459,12 @@ func (cp *CommandPalette) confirm() {
 		if name == "" || (baseURL == "" && providerType == "openai") || (apiKey == "" && providerType != "ollama") {
 			return
 		}
+		// A blank base URL means "use this provider's default host"; persist that
+		// default explicitly (the same value shown as the placeholder) so the stored
+		// endpoint is self-describing rather than relying on goai's silent fallback.
+		if baseURL == "" {
+			baseURL = epBaseURLHint(providerType)
+		}
 		if cp.onAddEndpoint != nil {
 			cp.onAddEndpoint(cp.editEndpoint, name, baseURL, apiKey, providerType)
 		}
