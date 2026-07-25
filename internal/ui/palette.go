@@ -31,9 +31,14 @@ const (
 // order the selector cycles through them.
 var permTypeOptions = []string{"readonly", "readwrite", "web_fetch"}
 
-// permFormLabelW is the display width of the permission form's "type ❯ " label;
-// the type pills begin at this indent (see drawPermFormFields).
-var permFormLabelW = tview.TaggedStringWidth("type ❯ ")
+// epTypeRowLabel and permTypeRowLabel are the type-selector labels for the endpoint
+// and permission forms. Each is passed to drawPillSelector (to draw) and pillHitIndex
+// (to hit-test), so the label, its width, and the pill start column all derive from
+// one string.
+const (
+	epTypeRowLabel   = "type     ❯ "
+	permTypeRowLabel = "type ❯ "
+)
 
 // epTypeOptions are the provider types offered on the endpoint form, in the order
 // the selector cycles through them. Index 0 ("openai") is the default.
@@ -57,10 +62,10 @@ var endpointHelpByType = map[string]string{
 		"frameworks that speak the Ollama API, like Lemonade Server and FastFlowLM.",
 }
 
-// epFormLabelW is the display width of the aligned form labels ("type     ❯ ",
+// epFormLabelW is the display width of the aligned form labels (epTypeRowLabel,
 // "name     ❯ ", "base url ❯ "), which all share one width. Form values, the type
 // choices, and the type explanation all begin at this indent.
-var epFormLabelW = tview.TaggedStringWidth("type     ❯ ")
+var epFormLabelW = tview.TaggedStringWidth(epTypeRowLabel)
 
 // endpointHelpLines word-wraps the selected provider's explanation to the region
 // to the right of the label, so it aligns under the type choices.
@@ -126,7 +131,7 @@ type paletteEndpointInfo struct {
 	Name    string
 	BaseURL string
 	APIKey  string
-	Type    string // provider type: "openai" (default) | "anthropic" | "google"
+	Type    string // provider type: "openai" (default) | "anthropic" | "google" | "ollama"
 }
 
 type paletteSkillInfo struct {
@@ -407,17 +412,47 @@ func (cp *CommandPalette) maxFormIndex() int {
 	return 3
 }
 
+// endpointFormLayout records the row offset of every field on the add/edit-endpoint
+// form (measured from the form's first row) plus the form's total height. The
+// drawer, the row counter, and the mouse hit-tester all read it, so the layout is
+// defined once and cannot drift across them. deleteRow is -1 when not editing (the
+// add form has no delete button).
+type endpointFormLayout struct {
+	typeRow   int
+	nameRow   int
+	urlRow    int
+	keyRow    int
+	deleteRow int
+	rows      int
+}
+
+// endpointLayout resolves the endpoint form's layout for the current help height
+// and mode. The explanation under the type selector wraps to the palette width, so
+// its line count (and thus every row below it) depends on w.
+func (cp *CommandPalette) endpointLayout(w int) endpointFormLayout {
+	help := len(cp.endpointHelpLines(epTypeOptions[cp.epType], w))
+	// Row 0 is the type selector; the wrapped explanation occupies the next `help`
+	// rows; then a blank spacer, then the three inputs.
+	lay := endpointFormLayout{nameRow: 1 + help + 1}
+	lay.urlRow = lay.nameRow + 1
+	lay.keyRow = lay.urlRow + 1
+	if cp.editEndpoint != "" {
+		lay.deleteRow = lay.keyRow + 2 // a blank spacer, then the delete button
+		lay.rows = lay.deleteRow + 1
+	} else {
+		lay.deleteRow = -1
+		lay.rows = lay.keyRow + 1
+	}
+	return lay
+}
+
 // formRows is the number of content rows the active form occupies. w is the
 // palette width, used to size the word-wrapped endpoint help text.
 func (cp *CommandPalette) formRows(w int) int {
 	if cp.mode == paletteModeAddPermission {
 		return 2 // type selector + path input
 	}
-	help := len(cp.endpointHelpLines(epTypeOptions[cp.epType], w))
-	if cp.editEndpoint != "" {
-		return help + 7 // type, help, blank, name, url, key, blank, delete
-	}
-	return help + 5 // type, help, blank, name, url, key
+	return cp.endpointLayout(w).rows
 }
 
 func (cp *CommandPalette) SetCallbacks(
@@ -494,26 +529,25 @@ func (cp *CommandPalette) InputHandler() func(*tcell.EventKey, func(tview.Primit
 		if cp.mode == paletteModeConfirm {
 			return // a dialog has no text field; navigation is handled globally
 		}
-		// In the permission form, ←/→ on the type row cycles the grant type.
-		if cp.mode == paletteModeAddPermission && cp.activeForm == 0 {
-			switch event.Key() {
-			case tcell.KeyLeft:
-				cp.permType = (cp.permType - 1 + len(permTypeOptions)) % len(permTypeOptions)
-				return
-			case tcell.KeyRight:
-				cp.permType = (cp.permType + 1) % len(permTypeOptions)
-				return
+		// On a type-selector row (index 0 of either form), ←/→ cycles the choice.
+		if cp.activeForm == 0 {
+			var sel *int
+			var n int
+			switch cp.mode {
+			case paletteModeAddPermission:
+				sel, n = &cp.permType, len(permTypeOptions)
+			case paletteModeAddEndpoint:
+				sel, n = &cp.epType, len(epTypeOptions)
 			}
-		}
-		// In the endpoint form, ←/→ on the type row (index 0) cycles the provider type.
-		if cp.mode == paletteModeAddEndpoint && cp.activeForm == 0 {
-			switch event.Key() {
-			case tcell.KeyLeft:
-				cp.epType = (cp.epType - 1 + len(epTypeOptions)) % len(epTypeOptions)
-				return
-			case tcell.KeyRight:
-				cp.epType = (cp.epType + 1) % len(epTypeOptions)
-				return
+			if sel != nil {
+				switch event.Key() {
+				case tcell.KeyLeft:
+					*sel = (*sel - 1 + n) % n
+					return
+				case tcell.KeyRight:
+					*sel = (*sel + 1) % n
+					return
+				}
 			}
 		}
 		var field tview.Primitive = cp.queryField
@@ -598,7 +632,7 @@ func (cp *CommandPalette) MouseHandler() func(tview.MouseAction, *tcell.EventMou
 				case tview.MouseLeftClick:
 					cp.activeForm = row
 					if row == 0 {
-						if h := pillHitIndex(x+2+permFormLabelW, mx, permTypeOptions, cp.permType); h >= 0 {
+						if h := pillHitIndex(x, mx, permTypeRowLabel, permTypeOptions, cp.permType); h >= 0 {
 							cp.permType = h
 						}
 					}
@@ -609,18 +643,21 @@ func (cp *CommandPalette) MouseHandler() func(tview.MouseAction, *tcell.EventMou
 		}
 
 		if cp.mode == paletteModeAddEndpoint {
-			// Rows: 0=type, then the selected type's explanation, a blank spacer,
-			// then name, url, key, another blank spacer, and (edit only) delete.
-			// Clicks on the explanation or spacer rows are inert.
-			helpN := len(cp.endpointHelpLines(epTypeOptions[cp.epType], w))
+			// Map the clicked row to a field through the shared layout; the type
+			// explanation and blank spacer rows fall through to idx -1 (inert).
+			lay := cp.endpointLayout(w)
 			idx := -1
-			switch {
-			case row == 0:
-				idx = 0 // type selector
-			case row > helpN+1 && row <= helpN+4:
-				idx = row - helpN - 1 // 1=name 2=url 3=key
-			case cp.editEndpoint != "" && row == helpN+6:
-				idx = 4 // delete button
+			switch row {
+			case lay.typeRow:
+				idx = 0
+			case lay.nameRow:
+				idx = 1
+			case lay.urlRow:
+				idx = 2
+			case lay.keyRow:
+				idx = 3
+			case lay.deleteRow:
+				idx = 4 // deleteRow is -1 outside edit mode, so never matches row >= 0
 			}
 			if idx < 0 {
 				if action == tview.MouseLeftDown || action == tview.MouseLeftClick {
@@ -635,7 +672,7 @@ func (cp *CommandPalette) MouseHandler() func(tview.MouseAction, *tcell.EventMou
 				cp.activeForm = idx
 				// On the type row, clicking a pill selects that provider directly.
 				if idx == 0 {
-					if h := pillHitIndex(x+2+epFormLabelW, mx, epTypeOptions, cp.epType); h >= 0 {
+					if h := pillHitIndex(x, mx, epTypeRowLabel, epTypeOptions, cp.epType); h >= 0 {
 						cp.epType = h
 					}
 				}
@@ -839,38 +876,23 @@ func (cp *CommandPalette) drawDialogPrompt(screen tcell.Screen, x, y, w int, st 
 
 func (cp *CommandPalette) drawFormFields(screen tcell.Screen, x, y, w int, bg tcell.Color) {
 	providerType := epTypeOptions[cp.epType]
+	lay := cp.endpointLayout(w)
 
-	// provider type (row 0) leads: a side-by-side pill selector like the permission form.
-	cp.drawEndpointType(screen, x, y, w, bg, cp.activeForm == 0)
-
-	// Explanation for the currently selected type, right under the selector and
-	// aligned under the type choices (indented past the label). Filled with the
-	// same highlight background as a selected list item so it reads as one block.
-	helpFill := tcell.StyleDefault.Background(paletteSelBg)
-	helpSt := tcell.StyleDefault.Background(paletteSelBg).Foreground(Theme.Faint)
-	helpLines := cp.endpointHelpLines(providerType, w)
-	indentX := x + 2 + epFormLabelW
-	rightBound := x + w - 2
-	for i, line := range helpLines {
-		rowY := y + 1 + i
-		for col := indentX; col < rightBound; col++ {
-			screen.SetContent(col, rowY, ' ', nil, helpFill)
-		}
-		drawText(screen, line, indentX, rowY, rightBound-indentX, helpSt)
-	}
-	y += 2 + len(helpLines) // move past the type row, its explanation, and a blank spacer
+	// provider type (row 0): a side-by-side pill selector with the selected type's
+	// explanation drawn right beneath it.
+	cp.drawPillSelector(screen, x, y+lay.typeRow, w, bg, epTypeRowLabel, epTypeOptions, cp.epType, cp.activeForm == 0, cp.endpointHelpLines(providerType, w))
 
 	// name and base url are plain single-line inputs. Each shows a greyed-out
 	// placeholder when empty (name usage hint; provider default/example URL).
-	cp.drawFormInput(screen, cp.nameField, "name     ❯ ", "(display name in hyphae)", x, y, w, bg, cp.activeForm == 1)
-	cp.drawFormInput(screen, cp.urlField, "base url ❯ ", epBaseURLHint(providerType), x, y+1, w, bg, cp.activeForm == 2)
+	cp.drawFormInput(screen, cp.nameField, "name     ❯ ", "(display name in hyphae)", x, y+lay.nameRow, w, bg, cp.activeForm == 1)
+	cp.drawFormInput(screen, cp.urlField, "base url ❯ ", epBaseURLHint(providerType), x, y+lay.urlRow, w, bg, cp.activeForm == 2)
 
 	// api key is masked (never draws keyField directly).
-	cp.drawFormKey(screen, x, y+2, w, bg, cp.activeForm == 3)
+	cp.drawFormKey(screen, x, y+lay.keyRow, w, bg, cp.activeForm == 3)
 
-	// Delete button (edit mode only), after a blank spacer row.
-	if cp.editEndpoint != "" {
-		rowY := y + 4
+	// Delete button (edit mode only).
+	if lay.deleteRow >= 0 {
+		rowY := y + lay.deleteRow
 		if cp.activeForm == 4 {
 			selSt := tcell.StyleDefault.Background(paletteSelBg).Foreground(Theme.Text)
 			for col := x + 1; col < x+w-1; col++ {
@@ -882,24 +904,31 @@ func (cp *CommandPalette) drawFormFields(screen tcell.Screen, x, y, w int, bg tc
 	}
 }
 
-// drawEndpointType renders the provider-type selector row: all options side by
-// side with the active one highlighted, mirroring the permission form's type row.
-func (cp *CommandPalette) drawEndpointType(screen tcell.Screen, x, y, w int, bg tcell.Color, focused bool) {
+// drawPillSelector renders a type-selector row: a "…❯ " label followed by the
+// options laid out side by side, the active one highlighted as a space-padded
+// pill, plus a ←/→ hint when focused. When descLines is non-empty (the endpoint
+// form's per-option explanation), it is drawn as a highlighted block right under
+// the pills, aligned beneath the choices; the permission form passes nil. The
+// endpoint and permission forms share it so their selectors stay visually identical
+// and pillHitIndex's geometry matches a single renderer. The label is white when
+// unfocused, Accent when focused.
+func (cp *CommandPalette) drawPillSelector(screen tcell.Screen, x, y, w int, bg tcell.Color, label string, options []string, active int, focused bool, descLines []string) {
 	labelColor := Theme.Text
 	if focused {
 		labelColor = Theme.Accent
 	}
 	col := x + 2
-	col += drawText(screen, "type     ❯ ", col, y, w-4, tcell.StyleDefault.Foreground(labelColor).Background(bg))
+	col += drawText(screen, label, col, y, w-4, tcell.StyleDefault.Foreground(labelColor).Background(bg))
+	pillX := col // first pill's left column; the description aligns here too
 
 	activeSt := tcell.StyleDefault.Foreground(Theme.Text).Background(paletteSelBg)
 	inactiveSt := tcell.StyleDefault.Foreground(Theme.Muted).Background(bg)
 	rightBound := x + w - 2
-	for i, opt := range epTypeOptions {
+	for i, opt := range options {
 		if i > 0 {
 			col += drawText(screen, "  ", col, y, rightBound-col, inactiveSt)
 		}
-		if i == cp.epType {
+		if i == active {
 			col += drawText(screen, " "+opt+" ", col, y, rightBound-col, activeSt)
 		} else {
 			col += drawText(screen, opt, col, y, rightBound-col, inactiveSt)
@@ -911,16 +940,28 @@ func (cp *CommandPalette) drawEndpointType(screen tcell.Screen, x, y, w int, bg 
 		hw := tview.TaggedStringWidth(hint)
 		drawText(screen, hint, rightBound-hw, y, hw, tcell.StyleDefault.Foreground(Theme.Muted).Background(bg))
 	}
+
+	// Explanation for the active option, aligned under the pills and filled with the
+	// same highlight background as a selected list item so it reads as one block.
+	helpFill := tcell.StyleDefault.Background(paletteSelBg)
+	helpSt := tcell.StyleDefault.Background(paletteSelBg).Foreground(Theme.Faint)
+	for i, line := range descLines {
+		rowY := y + 1 + i
+		for c := pillX; c < rightBound; c++ {
+			screen.SetContent(c, rowY, ' ', nil, helpFill)
+		}
+		drawText(screen, line, pillX, rowY, rightBound-pillX, helpSt)
+	}
 }
 
-// pillHitIndex returns the index of the side-by-side pill (as laid out by the
-// type-selector rows in drawEndpointType / drawPermFormFields) that contains
-// screen column mx, or -1 if mx falls on a gap between pills. startX is the first
-// pill's left column; active is the highlighted index (its pill is padded with
-// surrounding spaces, so it is two columns wider). Both selector rows share this
-// so a click selects the pill under the cursor directly.
-func pillHitIndex(startX, mx int, options []string, active int) int {
-	col := startX
+// pillHitIndex returns the index of the side-by-side pill that contains screen
+// column mx, or -1 if mx falls on a gap between pills. It mirrors drawPillSelector's
+// layout: pills start just past the label (x+2+label width), are separated by a
+// two-column gap, and the active pill is padded with surrounding spaces (two columns
+// wider). Passing the same x and label the selector was drawn with keeps hit-testing
+// and rendering in lockstep, so a click selects the pill under the cursor directly.
+func pillHitIndex(x, mx int, label string, options []string, active int) int {
+	col := x + 2 + tview.TaggedStringWidth(label)
 	for i, opt := range options {
 		if i > 0 {
 			col += 2 // gap between pills
@@ -941,35 +982,7 @@ func pillHitIndex(startX, mx int, options []string, active int) int {
 // shows all three choices with the active one highlighted (←/→ moves it), and the
 // path input on row 1.
 func (cp *CommandPalette) drawPermFormFields(screen tcell.Screen, x, y, w int, bg tcell.Color) {
-	focused := cp.activeForm == 0
-
-	labelColor := Theme.Muted
-	if focused {
-		labelColor = Theme.Accent // focused field label uses Accent, like the endpoint form
-	}
-	col := x + 2
-	col += drawText(screen, "type ❯ ", col, y, w-4, tcell.StyleDefault.Foreground(labelColor).Background(bg))
-
-	// All three types are shown side by side; the active one is a highlighted pill.
-	activeSt := tcell.StyleDefault.Foreground(Theme.Text).Background(paletteSelBg)
-	inactiveSt := tcell.StyleDefault.Foreground(Theme.Muted).Background(bg)
-	rightBound := x + w - 2
-	for i, opt := range permTypeOptions {
-		if i > 0 {
-			col += drawText(screen, "  ", col, y, rightBound-col, inactiveSt)
-		}
-		if i == cp.permType {
-			col += drawText(screen, " "+opt+" ", col, y, rightBound-col, activeSt)
-		} else {
-			col += drawText(screen, opt, col, y, rightBound-col, inactiveSt)
-		}
-	}
-
-	if focused {
-		hint := "←/→"
-		hw := tview.TaggedStringWidth(hint)
-		drawText(screen, hint, rightBound-hw, y, hw, tcell.StyleDefault.Foreground(Theme.Muted).Background(bg))
-	}
+	cp.drawPillSelector(screen, x, y, w, bg, permTypeRowLabel, permTypeOptions, cp.permType, cp.activeForm == 0, nil)
 
 	// Row 1: path input (reuses the shared single-line form input renderer).
 	label := "path ❯ "
