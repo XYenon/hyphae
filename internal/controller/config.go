@@ -138,6 +138,22 @@ func (c *Controller) ListSessions() ([]SessionSummary, error) {
 	return out, nil
 }
 
+// fetchModelContextWindow asks m's endpoint for the model's context window,
+// resolving the endpoint from config the same way agentForModel does. Used as a
+// fallback when models.dev has no entry (e.g. local Ollama models). Returns 0 for
+// providers that cannot report it.
+func (c *Controller) fetchModelContextWindow(m Model) int64 {
+	ep := c.cfg.ActiveEndpoint()
+	for _, e := range c.cfg.Endpoints {
+		if e.Name == m.Endpoint {
+			ep = e
+			break
+		}
+	}
+	ag := agent.New(ep.ProviderType(), ep.BaseURL, ep.APIKey, m.ID)
+	return ag.ModelContextWindow(c.ctx)
+}
+
 // EnrichSessionAsync fills any missing context window / pricing for one session's
 // model from models.dev. It updates only that session's record — never its
 // identity, and never any other session — emits EvContextWindow when the value
@@ -156,7 +172,13 @@ func (c *Controller) EnrichSessionAsync(sessionID string) {
 	}
 
 	info := FetchModelDevInfo(c.ctx, m.ID)
-	if info.ContextWindow <= 0 && info.InputPrice == 0 && info.OutputPrice == 0 {
+	ctxWindow := info.ContextWindow
+	if ctxWindow <= 0 && m.ContextWindow <= 0 {
+		// models.dev has no entry (e.g. a local Ollama model); ask the endpoint
+		// itself. No-ops (returns 0, no request) for providers that can't report it.
+		ctxWindow = c.fetchModelContextWindow(m)
+	}
+	if ctxWindow <= 0 && info.InputPrice == 0 && info.OutputPrice == 0 {
 		return
 	}
 
@@ -167,8 +189,8 @@ func (c *Controller) EnrichSessionAsync(sessionID string) {
 		return
 	}
 	changed := false
-	if info.ContextWindow > 0 && cur.ContextWindow != info.ContextWindow {
-		cur.ContextWindow = info.ContextWindow
+	if ctxWindow > 0 && cur.ContextWindow != ctxWindow {
+		cur.ContextWindow = ctxWindow
 		changed = true
 	}
 	if info.InputPrice > 0 && cur.InputPrice != info.InputPrice {

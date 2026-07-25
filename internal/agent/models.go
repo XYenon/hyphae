@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -50,6 +51,29 @@ func httpGetJSON(ctx context.Context, urlStr string, headers map[string]string, 
 	if resp.StatusCode/100 != 2 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return fmt.Errorf("models list: %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+// httpPostJSON performs a POST with a JSON body and decodes the JSON response.
+func httpPostJSON(ctx context.Context, urlStr string, reqBody, out any) error {
+	buf, err := json.Marshal(reqBody)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, urlStr, bytes.NewReader(buf))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode/100 != 2 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("%s: %s", resp.Status, strings.TrimSpace(string(body)))
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
 }
@@ -105,10 +129,11 @@ func (a *Agent) listAnthropicModels(ctx context.Context) ([]ModelInfo, error) {
 }
 
 // listOllamaModels queries the Ollama GET /api/tags endpoint, which lists the
-// models pulled on the local server. Ollama does not report a context window, so
-// ContextWindow is left 0 (filled later from the models.dev catalog).
+// models pulled on the local server, then fills each model's context window from
+// POST /api/show (tags does not report it). A show failure leaves ContextWindow 0
+// (filled later from the models.dev catalog).
 func (a *Agent) listOllamaModels(ctx context.Context) ([]ModelInfo, error) {
-	base := a.baseURL
+	base := strings.TrimRight(a.baseURL, "/")
 	if base == "" {
 		base = "http://localhost:11434"
 	}
@@ -117,14 +142,49 @@ func (a *Agent) listOllamaModels(ctx context.Context) ([]ModelInfo, error) {
 			Name string `json:"name"`
 		} `json:"models"`
 	}
-	if err := httpGetJSON(ctx, strings.TrimRight(base, "/")+"/api/tags", nil, &body); err != nil {
+	if err := httpGetJSON(ctx, base+"/api/tags", nil, &body); err != nil {
 		return nil, err
 	}
 	out := make([]ModelInfo, len(body.Models))
 	for i, m := range body.Models {
-		out[i] = ModelInfo{ID: m.Name}
+		out[i] = ModelInfo{ID: m.Name, ContextWindow: ollamaContextWindow(ctx, base, m.Name)}
 	}
 	return out, nil
+}
+
+// ModelContextWindow returns the context window for the agent's model by asking
+// the provider directly, for providers whose models are absent from the
+// models.dev catalog. Only Ollama (via /api/show) is supported; others return 0.
+func (a *Agent) ModelContextWindow(ctx context.Context) int64 {
+	if a.providerType != "ollama" {
+		return 0
+	}
+	base := strings.TrimRight(a.baseURL, "/")
+	if base == "" {
+		base = "http://localhost:11434"
+	}
+	return ollamaContextWindow(ctx, base, a.modelID)
+}
+
+// ollamaContextWindow reads a model's context length from POST /api/show. Ollama
+// reports it under a per-architecture key ("<arch>.context_length") in model_info;
+// the value is returned, or 0 if the request fails or the key is absent.
+func ollamaContextWindow(ctx context.Context, base, model string) int64 {
+	var body struct {
+		ModelInfo map[string]json.RawMessage `json:"model_info"`
+	}
+	if err := httpPostJSON(ctx, base+"/api/show", map[string]any{"model": model}, &body); err != nil {
+		return 0
+	}
+	for k, v := range body.ModelInfo {
+		if strings.HasSuffix(k, ".context_length") {
+			var n int64
+			if json.Unmarshal(v, &n) == nil {
+				return n
+			}
+		}
+	}
+	return 0
 }
 
 // listGoogleModels queries the Gemini GET /v1beta/models endpoint. Model names
