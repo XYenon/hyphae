@@ -620,7 +620,7 @@ func buildScriptEnv(ctx context.Context, ch chan<- Event, workDir string, counte
 			if approvalNeeded(toolName, argsMap, workDir, grants) {
 				reasoning := strings.TrimSpace(str(argsMap, "reasoning"))
 				if reasoning == "" {
-					return nil, errors.New("this is outside your current permissions, so it needs the user's approval — pass reasoning= explaining why. For repeated access, call request_access(type=, target=, reasoning=) instead to gain standing permission: type=\"readonly\" when you'll read the same out-of-scope location more than once; type=\"web_fetch\" when you'll fetch several URLs under one prefix, not for a one-off fetch; type=\"readwrite\" only when the user has explicitly handed you full control of a directory or project")
+					return nil, fmt.Errorf("Add a reasoning= field to the kwargs of %s, alongside its other arguments (not to the run() call), explaining why you need this — e.g. %s(..., reasoning=\"comparing against the upstream config outside my working dir\"). This location is outside your current permissions, and the reasoning= field is what lets the call go through. For repeated access to the same place you may instead call request_access(type=, target=, reasoning=) once to gain standing permission — type=\"readonly\" to keep reading one out-of-scope location, type=\"web_fetch\" to fetch several URLs under one prefix (not a one-off fetch), type=\"readwrite\" only when the user has explicitly handed you full control of a directory or project", toolName, toolName)
 				}
 				delete(argsMap, "reasoning") // shown as its own field, never listed as an arg
 				te := &ToolEvent{
